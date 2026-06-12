@@ -6,10 +6,13 @@
 
 - 使用中文沟通。
 - 开发前读取 `doc/requirements.md` 和 `doc/development-and-test-plan.md`。
+- 开发前检查 `doc/development-and-test-plan.md` 中的“跨 Mac/PC 开发约束”。
 - 开发前检查 `git status --short`。
 - 不要覆盖用户已有改动。
 - 核心游戏规则必须写在纯 TypeScript 模块中，不要塞进 Vue 组件或 Three.js 渲染类。
 - Three.js 渲染层只负责表现、动画和输入输出连接。
+- 保持 Mac 和 Windows PC 双端兼容：不要写平台专属路径、大小写错误的 import、Unix-only npm scripts。
+- 键盘输入使用 `KeyboardEvent.code`，例如 `KeyW`、`KeyA`、`KeyD`。
 - 每个阶段结束时运行可行的测试和 `npm run build`。
 - 有前端变化时启动本地 dev server，并用 in-app Browser 验收 canvas、控制台和关键交互。
 - 如果发现需求需要调整，先更新 `doc/requirements.md` 或 `doc/development-and-test-plan.md`。

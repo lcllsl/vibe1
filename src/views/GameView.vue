@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import type { GameInput } from '../types/game'
 import SettingsDialog from '../components/SettingsDialog.vue'
 import { SphereGameScene } from '../game/render/sphereScene'
@@ -8,8 +8,9 @@ import type { SphereGameState } from '../game/sphere/types'
 import { createSphereConfigFromSettings, gameSettings } from '../game/settings'
 
 const stageRef = ref<HTMLElement | null>(null)
-const state = ref<SphereGameState>(createSphereState(createSphereConfigFromSettings(gameSettings)))
-const pressedCodes = reactive(new Set<string>())
+let currentState = createSphereState(createSphereConfigFromSettings(gameSettings))
+const state = shallowRef<SphereGameState>(currentState)
+const pressedCodes = new Set<string>()
 const settingsOpen = ref(false)
 const settingsPausedGame = ref(false)
 const highScore = ref(readHighScore())
@@ -17,12 +18,8 @@ const highScore = ref(readHighScore())
 let scene: SphereGameScene | undefined
 let animationFrame = 0
 let lastTime = performance.now()
+let lastHudUpdate = 0
 
-const input = computed<GameInput>(() => ({
-  turnLeft: pressedCodes.has('KeyA'),
-  turnRight: pressedCodes.has('KeyD'),
-  boost: pressedCodes.has('KeyW'),
-}))
 const statusText = computed(() => state.value.status === 'failed' ? '失败' : state.value.status === 'paused' ? '暂停' : '进行中')
 const lengthText = computed(() => state.value.snake.length.toFixed(1))
 const speedText = computed(() => state.value.snake.speed.toFixed(1))
@@ -36,20 +33,25 @@ const activeEffectsText = computed(() => {
 })
 
 function restartGame(): void {
-  state.value = createSphereState(createSphereConfigFromSettings(gameSettings))
+  currentState = createSphereState(createSphereConfigFromSettings(gameSettings))
+  state.value = currentState
   lastTime = performance.now()
 }
 
 function openSettings(): void {
-  settingsPausedGame.value = state.value.status === 'playing'
-  if (settingsPausedGame.value) state.value = pauseSphereGame(state.value)
+  settingsPausedGame.value = currentState.status === 'playing'
+  if (settingsPausedGame.value) {
+    currentState = pauseSphereGame(currentState)
+    state.value = currentState
+  }
   settingsOpen.value = true
 }
 
 function closeSettings(): void {
   settingsOpen.value = false
-  if (settingsPausedGame.value && state.value.status === 'paused') {
-    state.value = resumeSphereGame(state.value)
+  if (settingsPausedGame.value && currentState.status === 'paused') {
+    currentState = resumeSphereGame(currentState)
+    state.value = currentState
     lastTime = performance.now()
   }
   settingsPausedGame.value = false
@@ -61,12 +63,13 @@ function applySettings(): void {
 }
 
 function togglePause(): void {
-  if (state.value.status === 'paused') {
-    state.value = resumeSphereGame(state.value)
+  if (currentState.status === 'paused') {
+    currentState = resumeSphereGame(currentState)
     lastTime = performance.now()
   } else {
-    state.value = pauseSphereGame(state.value)
+    currentState = pauseSphereGame(currentState)
   }
+  state.value = currentState
 }
 
 function handleKeyDown(event: KeyboardEvent): void {
@@ -94,17 +97,34 @@ function handleKeyUp(event: KeyboardEvent): void {
 function loop(now: number): void {
   const deltaTime = (now - lastTime) / 1000
   lastTime = now
-  state.value = updateSphereGame(state.value, input.value, deltaTime)
-  if (state.value.score > highScore.value) {
-    highScore.value = state.value.score
-    localStorage.setItem('sphere-snake-high-score', String(highScore.value))
+  currentState = updateSphereGame(currentState, readInput(), deltaTime)
+  if (currentState.score > highScore.value) {
+    highScore.value = currentState.score
+    if (typeof globalThis.localStorage?.setItem === 'function') {
+      globalThis.localStorage.setItem('sphere-snake-high-score', String(highScore.value))
+    }
   }
-  scene?.update(state.value)
+  scene?.update(currentState)
+  if (now - lastHudUpdate >= 100 || state.value.status !== currentState.status) {
+    state.value = currentState
+    lastHudUpdate = now
+  }
   animationFrame = requestAnimationFrame(loop)
 }
 
+function readInput(): GameInput {
+  return {
+    turnLeft: pressedCodes.has('KeyA'),
+    turnRight: pressedCodes.has('KeyD'),
+    boost: pressedCodes.has('KeyW'),
+  }
+}
+
 function readHighScore(): number {
-  const value = Number(localStorage.getItem('sphere-snake-high-score'))
+  const stored = typeof globalThis.localStorage?.getItem === 'function'
+    ? globalThis.localStorage.getItem('sphere-snake-high-score')
+    : null
+  const value = Number(stored)
   return Number.isFinite(value) ? value : 0
 }
 
@@ -116,8 +136,8 @@ function formatTime(seconds: number): string {
 
 onMounted(() => {
   if (!stageRef.value) return
-  scene = new SphereGameScene(stageRef.value, state.value.config.sphereRadius)
-  scene.update(state.value)
+  scene = new SphereGameScene(stageRef.value, currentState.config.sphereRadius)
+  scene.update(currentState)
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keyup', handleKeyUp)
   animationFrame = requestAnimationFrame(loop)

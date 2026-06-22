@@ -12,6 +12,15 @@ const TERRAIN_PARTICLE_COUNT = 120
 const CAMERA_RADIAL_OFFSET = 34
 const CAMERA_BACK_OFFSET = 23
 const CAMERA_LOOK_AHEAD = 4
+const FOOD_SPRITE_UV: Record<FoodType, { x: number; y: number }> = {
+  normal: { x: 0, y: 0.5 },
+  feast: { x: 0.25, y: 0.5 },
+  speedUp: { x: 0.5, y: 0.5 },
+  slowDown: { x: 0.75, y: 0.5 },
+  cluster: { x: 0, y: 0 },
+  rainbowCandy: { x: 0.25, y: 0 },
+  superPotion: { x: 0.5, y: 0 },
+}
 
 interface TerrainParticle {
   position: THREE.Vector3
@@ -27,7 +36,10 @@ export class SphereGameScene {
   private readonly renderer: THREE.WebGLRenderer
   private readonly snakeGroup = new THREE.Group()
   private readonly bodyMeshes: THREE.Mesh[] = []
-  private readonly foodMeshes = new Map<string, THREE.Mesh>()
+  private readonly bodyGeometry = new THREE.CapsuleGeometry(0.32, 0.4, 8, 14)
+  private readonly foodSprites = new Map<string, THREE.Sprite>()
+  private readonly foodMaterials = new Map<FoodType, THREE.SpriteMaterial>()
+  private readonly foodAtlas: THREE.Texture
   private readonly headGroup: THREE.Group
   private readonly terrainParticles: THREE.Points
   private readonly terrainParticlePositions = new Float32Array(TERRAIN_PARTICLE_COUNT * 3)
@@ -44,6 +56,14 @@ export class SphereGameScene {
   private readonly cameraPosition = new THREE.Vector3()
   private readonly cameraLookAt = new THREE.Vector3()
   private readonly cameraUp = new THREE.Vector3(0, 1, 0)
+  private readonly segments: Vector3[] = []
+  private readonly visualPositions: THREE.Vector3[] = []
+  private readonly tempA = new THREE.Vector3()
+  private readonly tempB = new THREE.Vector3()
+  private readonly tempC = new THREE.Vector3()
+  private readonly tempD = new THREE.Vector3()
+  private readonly tempE = new THREE.Vector3()
+  private readonly headBasis = new THREE.Matrix4()
   private terrainParticleCursor = 0
   private terrainParticleAccumulator = 0
   private lastParticleElapsed = 0
@@ -51,6 +71,14 @@ export class SphereGameScene {
 
   constructor(container: HTMLElement, sphereRadius: number) {
     this.container = container
+    this.foodAtlas = new THREE.TextureLoader().load('/food-sprites.png', (atlas) => {
+      atlas.colorSpace = THREE.SRGBColorSpace
+      this.foodMaterials.forEach((material, type) => {
+        material.map?.dispose()
+        material.map = this.createFoodTexture(type)
+        material.needsUpdate = true
+      })
+    })
     this.renderer = new THREE.WebGLRenderer({ antialias: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xcfeeff, 1)
@@ -110,9 +138,9 @@ export class SphereGameScene {
     this.updateTerrainParticles(state)
 
     const radius = state.config.sphereRadius
-    const normal = toThree(state.snake.position).normalize()
-    const head = normal.clone().multiplyScalar(radius + SURFACE_LIFT)
-    const transportedUp = this.cameraUp.clone().addScaledVector(normal, -this.cameraUp.dot(normal))
+    const normal = copyVector(this.tempA, state.snake.position).normalize()
+    const head = this.tempB.copy(normal).multiplyScalar(radius + SURFACE_LIFT)
+    const transportedUp = this.tempC.copy(this.cameraUp).addScaledVector(normal, -this.cameraUp.dot(normal))
 
     if (transportedUp.lengthSq() < 0.0001) {
       transportedUp.set(0, 1, 0).addScaledVector(normal, -normal.y)
@@ -122,10 +150,10 @@ export class SphereGameScene {
     }
     transportedUp.normalize()
 
-    const desiredPosition = normal.clone().multiplyScalar(radius + CAMERA_RADIAL_OFFSET)
-      .add(transportedUp.clone().multiplyScalar(-CAMERA_BACK_OFFSET))
-    const desiredLookAt = head.clone().add(transportedUp.clone().multiplyScalar(CAMERA_LOOK_AHEAD))
-      .add(normal.clone().multiplyScalar(-0.5))
+    const desiredPosition = this.tempD.copy(normal).multiplyScalar(radius + CAMERA_RADIAL_OFFSET)
+      .addScaledVector(transportedUp, -CAMERA_BACK_OFFSET)
+    const desiredLookAt = this.tempE.copy(head).addScaledVector(transportedUp, CAMERA_LOOK_AHEAD)
+      .addScaledVector(normal, -0.5)
 
     this.cameraPosition.lerp(desiredPosition, 0.075)
     this.cameraLookAt.lerp(desiredLookAt, 0.11)
@@ -146,59 +174,74 @@ export class SphereGameScene {
       if (Array.isArray(mesh.material)) mesh.material.forEach((material) => material.dispose())
       else mesh.material?.dispose()
     })
+    this.foodMaterials.forEach((material) => {
+      material.map?.dispose()
+      material.dispose()
+    })
+    this.foodAtlas.dispose()
+    this.bodyGeometry.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }
 
   private updateSnake(state: SphereGameState): void {
     const radius = state.config.sphereRadius + SURFACE_LIFT
-    const segments = getSphereSegments(state.snake, state.config.segmentSpacing * 1.35)
+    const segments = getSphereSegments(state.snake, state.config.segmentSpacing * 1.35, this.segments)
     this.ensureBodyMeshes(Math.max(0, segments.length - 1))
-    const headNormal = toThree(state.snake.position).normalize()
-    const headForward = toThree(state.snake.forward).normalize()
-    const headSide = new THREE.Vector3().crossVectors(headForward, headNormal).normalize()
-    const headBasis = new THREE.Matrix4().makeBasis(headSide, headForward, headNormal)
+    const headNormal = copyVector(this.tempA, state.snake.position).normalize()
+    const headForward = copyVector(this.tempB, state.snake.forward).normalize()
+    const headSide = this.tempC.crossVectors(headForward, headNormal).normalize()
+    this.headBasis.makeBasis(headSide, headForward, headNormal)
 
-    this.headGroup.position.copy(headNormal.clone().multiplyScalar(radius))
-    this.headGroup.quaternion.setFromRotationMatrix(headBasis)
+    this.headGroup.position.copy(headNormal).multiplyScalar(radius)
+    this.headGroup.quaternion.setFromRotationMatrix(this.headBasis)
 
     const lengthFactor = THREE.MathUtils.smoothstep(state.snake.length, 3, 10)
     const waveAmplitude = THREE.MathUtils.lerp(0.0035, 0.012, lengthFactor)
-    const visualPositions = segments.map((segment, index) => {
-      const normal = toThree(segment).normalize()
-      if (index === 0) return normal.multiplyScalar(radius)
+    while (this.visualPositions.length < segments.length) this.visualPositions.push(new THREE.Vector3())
+    this.visualPositions.length = segments.length
 
-      const previousNormal = toThree(segments[index - 1]).normalize()
-      const nextNormal = toThree(segments[Math.min(index + 1, segments.length - 1)]).normalize()
+    for (let index = 0; index < segments.length; index += 1) {
+      const normal = copyVector(this.visualPositions[index], segments[index]).normalize()
+      if (index === 0) {
+        normal.multiplyScalar(radius)
+        continue
+      }
+
+      const previousNormal = copyVector(this.tempA, segments[index - 1]).normalize()
+      const nextNormal = copyVector(this.tempB, segments[Math.min(index + 1, segments.length - 1)]).normalize()
       const pathTangent = previousNormal.sub(nextNormal)
       pathTangent.addScaledVector(normal, -pathTangent.dot(normal))
-      if (pathTangent.lengthSq() < 0.000001) return normal.multiplyScalar(radius)
+      if (pathTangent.lengthSq() < 0.000001) {
+        normal.multiplyScalar(radius)
+        continue
+      }
 
       pathTangent.normalize()
-      const side = new THREE.Vector3().crossVectors(pathTangent, normal).normalize()
+      const side = this.tempC.crossVectors(pathTangent, normal).normalize()
       const bodyProgress = index / Math.max(segments.length - 1, 1)
       const headBlend = Math.min(1, index / 4)
       const tailBlend = 0.55 + bodyProgress * 0.45
       const waveAngle = Math.sin(state.elapsed * 5.8 - index * 0.72)
         * waveAmplitude * headBlend * tailBlend
 
-      return normal.multiplyScalar(Math.cos(waveAngle))
+      normal.multiplyScalar(Math.cos(waveAngle))
         .addScaledVector(side, Math.sin(waveAngle))
         .normalize()
         .multiplyScalar(radius)
-    })
+    }
 
     for (let index = 1; index < segments.length; index += 1) {
       const mesh = this.bodyMeshes[index - 1]
       const taper = Math.max(0.58, 1 - index / Math.max(segments.length, 1) * 0.42)
       const bodyProgress = index / Math.max(segments.length - 1, 1)
-      const previous = visualPositions[index - 1]
-      const next = visualPositions[Math.min(index + 1, visualPositions.length - 1)]
-      const tangent = previous.clone().sub(next).normalize()
+      const previous = this.visualPositions[index - 1]
+      const next = this.visualPositions[Math.min(index + 1, this.visualPositions.length - 1)]
+      const tangent = this.tempD.copy(previous).sub(next).normalize()
       const material = mesh.material as THREE.MeshStandardMaterial
 
       mesh.visible = true
-      mesh.position.copy(visualPositions[index])
+      mesh.position.copy(this.visualPositions[index])
       mesh.scale.setScalar(taper)
       mesh.quaternion.setFromUnitVectors(Y_AXIS, tangent)
       material.color.lerpColors(BODY_HEAD_COLOR, BODY_TAIL_COLOR, bodyProgress)
@@ -211,29 +254,26 @@ export class SphereGameScene {
 
   private updateFoods(state: SphereGameState): void {
     const liveIds = new Set(state.foods.map((food) => food.id))
-    this.foodMeshes.forEach((mesh, id) => {
+    this.foodSprites.forEach((sprite, id) => {
       if (!liveIds.has(id)) {
-        this.scene.remove(mesh)
-        mesh.geometry.dispose()
-        disposeMaterial(mesh.material)
-        this.foodMeshes.delete(id)
+        this.scene.remove(sprite)
+        this.foodSprites.delete(id)
       }
     })
 
     state.foods.forEach((food) => {
-      const mesh = this.foodMeshes.get(food.id) ?? this.createFoodMesh(food)
+      const sprite = this.foodSprites.get(food.id) ?? this.createFoodSprite(food)
       const pulse = Math.sin(state.elapsed * 4 + food.position.x * 8) * 0.05
-      mesh.position.copy(toThree(food.position).multiplyScalar(state.config.sphereRadius + 0.56 + pulse))
-      mesh.rotation.x += 0.012
-      mesh.rotation.y += 0.025
-      mesh.scale.setScalar((food.temporary ? 0.78 : 1) * 1.65)
+      copyVector(sprite.position, food.position).multiplyScalar(state.config.sphereRadius + 0.62 + pulse)
+      const size = (food.temporary ? 2.15 : 2.7) * (1 + Math.sin(state.elapsed * 4.2 + food.position.y) * 0.035)
+      sprite.scale.set(size, size, 1)
     })
   }
 
   private ensureBodyMeshes(count: number): void {
     while (this.bodyMeshes.length < count) {
       const mesh = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.32, 0.4, 8, 14),
+        this.bodyGeometry,
         new THREE.MeshStandardMaterial({ color: 0x77dcb7, emissive: 0x1d7658, emissiveIntensity: 0.08, roughness: 0.5 }),
       )
       mesh.castShadow = true
@@ -242,20 +282,36 @@ export class SphereGameScene {
     }
   }
 
-  private createFoodMesh(food: SphereFood): THREE.Mesh {
-    const geometry = foodGeometry(food.type)
-    const material = new THREE.MeshStandardMaterial({
-      color: foodColor(food.type),
-      emissive: foodColor(food.type),
-      emissiveIntensity: food.type === 'superPotion' ? 0.5 : 0.14,
-      roughness: 0.36,
-      flatShading: true,
+  private createFoodSprite(food: SphereFood): THREE.Sprite {
+    const sprite = new THREE.Sprite(this.getFoodMaterial(food.type))
+    sprite.center.set(0.5, 0.42)
+    this.foodSprites.set(food.id, sprite)
+    this.scene.add(sprite)
+    return sprite
+  }
+
+  private getFoodMaterial(type: FoodType): THREE.SpriteMaterial {
+    const existing = this.foodMaterials.get(type)
+    if (existing) return existing
+
+    const material = new THREE.SpriteMaterial({
+      map: this.foodAtlas.image ? this.createFoodTexture(type) : null,
+      transparent: true,
+      alphaTest: 0.08,
+      depthWrite: false,
     })
-    const mesh = new THREE.Mesh(geometry, material)
-    mesh.castShadow = true
-    this.foodMeshes.set(food.id, mesh)
-    this.scene.add(mesh)
-    return mesh
+    this.foodMaterials.set(type, material)
+    return material
+  }
+
+  private createFoodTexture(type: FoodType): THREE.Texture {
+    const texture = this.foodAtlas.clone()
+    const uv = FOOD_SPRITE_UV[type]
+    texture.repeat.set(0.25, 0.5)
+    texture.offset.set(uv.x, uv.y)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.needsUpdate = true
+    return texture
   }
 
   private createTerrainParticles(): THREE.Points {
@@ -327,10 +383,10 @@ export class SphereGameScene {
   }
 
   private emitTerrainParticles(state: SphereGameState, count: number): void {
-    const normal = toThree(state.snake.position).normalize()
-    const forward = toThree(state.snake.forward).normalize()
-    const side = new THREE.Vector3().crossVectors(forward, normal).normalize()
-    const origin = normal.clone()
+    const normal = copyVector(this.tempA, state.snake.position).normalize()
+    const forward = copyVector(this.tempB, state.snake.forward).normalize()
+    const side = this.tempC.crossVectors(forward, normal).normalize()
+    const origin = this.tempD.copy(normal)
       .multiplyScalar(state.config.sphereRadius + 0.1)
       .addScaledVector(forward, -0.06)
     const terrain = sampleTerrain(state.snake.position).type
@@ -500,34 +556,6 @@ function createCartoonSnakeHead(): THREE.Group {
   return group
 }
 
-function foodGeometry(type: FoodType): THREE.BufferGeometry {
-  if (type === 'feast') return new THREE.TorusGeometry(0.34, 0.14, 10, 20)
-  if (type === 'speedUp') return new THREE.ConeGeometry(0.32, 0.72, 6)
-  if (type === 'slowDown') return new THREE.DodecahedronGeometry(0.4, 0)
-  if (type === 'cluster') return new THREE.OctahedronGeometry(0.43, 0)
-  if (type === 'rainbowCandy') return new THREE.TorusKnotGeometry(0.23, 0.1, 36, 8)
-  if (type === 'superPotion') return new THREE.CapsuleGeometry(0.24, 0.4, 6, 12)
-  return new THREE.IcosahedronGeometry(0.38, 1)
-}
-
-function foodColor(type: FoodType): number {
-  const colors: Record<FoodType, number> = {
-    normal: 0xff8fad,
-    feast: 0xffc45c,
-    speedUp: 0xffe65f,
-    slowDown: 0xa9b7ff,
-    cluster: 0xff86d6,
-    rainbowCandy: 0xb58cff,
-    superPotion: 0x72e8ff,
-  }
-  return colors[type]
-}
-
-function toThree(vector: Vector3): THREE.Vector3 {
-  return new THREE.Vector3(vector.x, vector.y, vector.z)
-}
-
-function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
-  if (Array.isArray(material)) material.forEach((entry) => entry.dispose())
-  else material.dispose()
+function copyVector(target: THREE.Vector3, source: Vector3): THREE.Vector3 {
+  return target.set(source.x, source.y, source.z)
 }

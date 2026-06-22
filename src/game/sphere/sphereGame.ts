@@ -135,8 +135,8 @@ export function resumeSphereGame(state: SphereGameState): SphereGameState {
   return state.status === 'paused' ? { ...state, status: 'playing' } : state
 }
 
-export function getSphereSegments(snake: SphereSnake, spacing: number): Vector3[] {
-  const segments: Vector3[] = []
+export function getSphereSegments(snake: SphereSnake, spacing: number, segments: Vector3[] = []): Vector3[] {
+  segments.length = 0
   let nextDistance = 0
 
   for (const point of snake.trail) {
@@ -181,10 +181,15 @@ function moveSnake(
   const movementAxis = normalize(cross(snake.position, forward))
   const position = normalize(rotateAroundAxis(snake.position, movementAxis, distance / config.sphereRadius))
   const movedForward = tangentAt(position, rotateAroundAxis(forward, movementAxis, distance / config.sphereRadius))
-  const trail = [
-    { position, distance: 0 },
-    ...snake.trail.map((point) => ({ ...point, distance: point.distance + distance })),
-  ].filter((point) => point.distance <= snake.length + config.segmentSpacing)
+  const trail = snake.trail
+  for (let index = 0; index < trail.length; index += 1) {
+    trail[index].distance += distance
+  }
+  trail.unshift({ position, distance: 0 })
+  const maxTrailDistance = snake.length + config.segmentSpacing
+  while (trail.length > 1 && trail[trail.length - 1].distance > maxTrailDistance) {
+    trail.pop()
+  }
 
   return { ...snake, position, forward: movedForward, trail, speed }
 }
